@@ -1,13 +1,13 @@
 """
-Duplicate File Finder Pro - Modern PySide6 Implementation
+Duplicate File Finder Pro - Complete Unified Code
 Features:
-- Dynamic Theme Switcher: Dark Mode & Light Mode (toggle instantly)
-- High-Performance QThread worker with SHA-256 duplicate hashing
-- Metric KPI Cards (Scanned files, Duplicate count, Wasted space, Selected space)
-- Smart Batch Selection: Keep Oldest, Keep Newest, Clear Selection
-- Safe deletion via send2trash (fallback to os.remove)
-- TXT Report exporter
-- File explorer reveal and clipboard path copy
+- Vazirmatn Font Integration
+- Vector Icons support via qtawesome (with safe fallback)
+- Soft Drop Shadows for Metric Cards
+- Interactive Shimmer / Skeleton Screen animation during scanning
+- Light/Dark theme toggling
+- Safe file deletion via send2trash
+- Report Export (TXT) & Context Menu
 """
 
 import sys
@@ -16,14 +16,21 @@ import hashlib
 from datetime import datetime
 from collections import defaultdict
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QColor, QAction
+from PySide6.QtCore import Qt, QThread, Signal, QPropertyAnimation, Property
+from PySide6.QtGui import QFont, QColor, QAction, QPainter, QLinearGradient, QPainterPath
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QLineEdit, QFileDialog,
     QProgressBar, QTreeWidget, QTreeWidgetItem, QHeaderView,
-    QMessageBox, QFrame, QMenu
+    QMessageBox, QFrame, QMenu, QGraphicsDropShadowEffect
 )
+
+# بررسی وجود کتابخانه‌های جانبی
+try:
+    import qtawesome as qta
+    HAS_QTA = True
+except ImportError:
+    HAS_QTA = False
 
 try:
     from send2trash import send2trash
@@ -32,6 +39,9 @@ except ImportError:
     HAS_SEND2TRASH = False
 
 
+# ==========================================
+# توابع کمکی (Helper Functions)
+# ==========================================
 def human_size(num_bytes: int) -> str:
     if num_bytes is None:
         return "-"
@@ -61,6 +71,160 @@ def file_hash(path: str, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+# ==========================================
+# ویجت‌های سفارشی اسکلتی (Shimmer Effects)
+# ==========================================
+class ShimmerItem(QWidget):
+    """عنصر تکین اسکلتی با نور متحرک گرادیان"""
+    def __init__(self, parent=None, border_radius=8, is_dark=False):
+        super().__init__(parent)
+        self.border_radius = border_radius
+        self.is_dark = is_dark
+        self._offset = -1.0
+
+        self.anim = QPropertyAnimation(self, b"offset")
+        self.anim.setDuration(1200)
+        self.anim.setStartValue(-1.0)
+        self.anim.setEndValue(2.0)
+        self.anim.setLoopCount(-1)
+        self.anim.start()
+
+    def get_offset(self):
+        return self._offset
+
+    def set_offset(self, val):
+        self._offset = val
+        self.update()
+
+    offset = Property(float, get_offset, set_offset)
+
+    def set_dark_mode(self, is_dark: bool):
+        self.is_dark = is_dark
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        if self.is_dark:
+            base_color = QColor(30, 41, 59)
+            highlight = QColor(51, 65, 85, 200)
+        else:
+            base_color = QColor(226, 232, 240)
+            highlight = QColor(241, 245, 249, 220)
+
+        x1 = w * self._offset
+        x2 = x1 + w * 0.6
+
+        gradient = QLinearGradient(x1, 0, x2, 0)
+        gradient.setColorAt(0.0, base_color)
+        gradient.setColorAt(0.5, highlight)
+        gradient.setColorAt(1.0, base_color)
+
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, w, h, self.border_radius, self.border_radius)
+        painter.fillPath(path, gradient)
+
+
+class SkeletonCard(QFrame):
+    """کارت اسکلتی مرکب برای نمایش وضعیت لودینگ"""
+    def __init__(self, is_dark=False):
+        super().__init__()
+        self.setObjectName("SkeletonCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.title_sk = ShimmerItem(border_radius=6, is_dark=is_dark)
+        self.title_sk.setFixedHeight(22)
+
+        self.line1_sk = ShimmerItem(border_radius=4, is_dark=is_dark)
+        self.line1_sk.setFixedHeight(14)
+
+        self.line2_sk = ShimmerItem(border_radius=4, is_dark=is_dark)
+        self.line2_sk.setFixedHeight(14)
+
+        layout.addWidget(self.title_sk)
+        layout.addWidget(self.line1_sk)
+        layout.addWidget(self.line2_sk)
+
+    def set_dark_mode(self, is_dark: bool):
+        self.title_sk.set_dark_mode(is_dark)
+        self.line1_sk.set_dark_mode(is_dark)
+        self.line2_sk.set_dark_mode(is_dark)
+
+
+# ==========================================
+# کارت شاخص‌های کلیدی (Metric KPI Card)
+# ==========================================
+class MetricCard(QFrame):
+    def __init__(self, title: str, initial_value: str = "0", accent_dark: str = "#38bdf8", accent_light: str = "#0284c7"):
+        super().__init__()
+        self.setObjectName("MetricCard")
+        self.accent_dark = accent_dark
+        self.accent_light = accent_light
+        self.is_dark = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setObjectName("MetricTitle")
+        self.lbl_title.setAlignment(Qt.AlignCenter)
+
+        self.lbl_value = QLabel(initial_value)
+        self.lbl_value.setObjectName("MetricValue")
+        self.lbl_value.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(self.lbl_title)
+        layout.addWidget(self.lbl_value)
+
+        self.shadow = QGraphicsDropShadowEffect(self)
+        self.shadow.setBlurRadius(16)
+        self.shadow.setXOffset(0)
+        self.shadow.setYOffset(4)
+        self.setGraphicsEffect(self.shadow)
+
+        self.apply_theme(False)
+
+    def set_value(self, val: str):
+        self.lbl_value.setText(val)
+
+    def apply_theme(self, is_dark: bool):
+        self.is_dark = is_dark
+        accent = self.accent_dark if is_dark else self.accent_light
+        bg = "#1e293b" if is_dark else "#ffffff"
+        border = "#334155" if is_dark else "#e2e8f0"
+        title_color = "#94a3b8" if is_dark else "#64748b"
+        shadow_color = QColor(0, 0, 0, 90) if is_dark else QColor(0, 0, 0, 20)
+
+        self.shadow.setColor(shadow_color)
+        self.setStyleSheet(f"""
+            QFrame#MetricCard {{
+                background-color: {bg};
+                border-radius: 12px;
+                border: 1px solid {border};
+            }}
+            QLabel#MetricTitle {{
+                color: {title_color};
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QLabel#MetricValue {{
+                color: {accent};
+                font-size: 20px;
+                font-weight: bold;
+            }}
+        """)
+
+
+# ==========================================
+# پردازشگر پس‌زمینه (Worker Thread)
+# ==========================================
 class ScanWorker(QThread):
     progress_changed = Signal(int)
     status_changed = Signal(str)
@@ -149,302 +313,93 @@ class ScanWorker(QThread):
             self.error_occurred.emit(str(e))
 
 
-class MetricCard(QFrame):
-    def __init__(self, title: str, initial_value: str = "0", accent_dark: str = "#38bdf8", accent_light: str = "#0284c7"):
-        super().__init__()
-        self.setObjectName("MetricCard")
-        self.accent_dark = accent_dark
-        self.accent_light = accent_light
-        self.is_dark = True
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
-
-        self.lbl_title = QLabel(title)
-        self.lbl_title.setObjectName("MetricTitle")
-        self.lbl_title.setAlignment(Qt.AlignCenter)
-
-        self.lbl_value = QLabel(initial_value)
-        self.lbl_value.setObjectName("MetricValue")
-        self.lbl_value.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self.lbl_title)
-        layout.addWidget(self.lbl_value)
-        self.apply_theme(True)
-
-    def set_value(self, val: str):
-        self.lbl_value.setText(val)
-
-    def apply_theme(self, is_dark: bool):
-        self.is_dark = is_dark
-        accent = self.accent_dark if is_dark else self.accent_light
-        bg = "#1e293b" if is_dark else "#ffffff"
-        border = "#334155" if is_dark else "#e2e8f0"
-        title_color = "#94a3b8" if is_dark else "#64748b"
-
-        self.setStyleSheet(f"""
-            QFrame#MetricCard {{
-                background-color: {bg};
-                border-radius: 12px;
-                border: 1px solid {border};
-            }}
-            QLabel#MetricTitle {{
-                color: {title_color};
-                font-size: 12px;
-                font-weight: 500;
-            }}
-            QLabel#MetricValue {{
-                color: {accent};
-                font-size: 20px;
-                font-weight: bold;
-            }}
-        """)
-
-
+# ==========================================
+# پنجره اصلی برنامه (Main Window)
+# ==========================================
 class ModernDuplicateFinder(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Duplicate File Finder Pro")
-        self.resize(1180, 780)
+        self.setFixedSize(1000, 650)
         self.duplicate_groups = {}
         self.worker = None
-        self.is_dark_theme = True
+        self.is_dark_theme = False
 
         self.init_ui()
         self.apply_theme()
 
     def get_dark_stylesheet(self) -> str:
         return """
-            QMainWindow {
-                background-color: #0f172a;
-            }
-            QWidget {
-                color: #f8fafc;
-                font-family: 'Segoe UI', Tahoma, sans-serif;
-                font-size: 13px;
-            }
-            QLineEdit {
-                background-color: #1e293b;
-                border: 1px solid #334155;
-                border-radius: 8px;
-                padding: 8px 12px;
-                color: #f8fafc;
-            }
-            QLineEdit:focus {
-                border: 1px solid #3b82f6;
-            }
-            QPushButton {
-                background-color: #1e293b;
-                color: #f8fafc;
-                border: 1px solid #334155;
-                border-radius: 8px;
-                padding: 8px 16px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #334155;
-            }
-            QPushButton#PrimaryBtn {
-                background-color: #2563eb;
-                border: none;
-            }
-            QPushButton#PrimaryBtn:hover {
-                background-color: #1d4ed8;
-            }
-            QPushButton#DangerBtn {
-                background-color: #dc2626;
-                border: none;
-            }
-            QPushButton#DangerBtn:hover {
-                background-color: #b91c1c;
-            }
-            QPushButton#DangerBtn:disabled {
-                background-color: #451a1a;
-                color: #7f1d1d;
-            }
-            QPushButton#ThemeToggleBtn {
-                background-color: #1e293b;
-                border: 1px solid #475569;
-                color: #f1f5f9;
-                padding: 8px 14px;
-            }
-            QPushButton#ThemeToggleBtn:hover {
-                background-color: #334155;
-            }
-            QProgressBar {
-                background-color: #1e293b;
-                border-radius: 6px;
-                text-align: center;
-                color: #ffffff;
-                font-size: 11px;
-                height: 12px;
-            }
-            QProgressBar::chunk {
-                background-color: #3b82f6;
-                border-radius: 6px;
-            }
-            QTreeWidget {
-                background-color: #1e293b;
-                border: 1px solid #334155;
-                border-radius: 10px;
-                outline: 0;
-                padding: 4px;
-            }
-            QTreeWidget::item {
-                padding: 6px 4px;
-                border-bottom: 1px solid #243044;
-            }
-            QTreeWidget::item:hover {
-                background-color: #27354a;
-            }
-            QTreeWidget::item:selected {
-                background-color: #1d4ed8;
-                color: #ffffff;
-            }
-            QHeaderView::section {
-                background-color: #0f172a;
-                color: #94a3b8;
-                padding: 8px;
-                border: none;
-                font-weight: 600;
-            }
-            QMenu {
-                background-color: #1e293b;
-                border: 1px solid #334155;
-                color: #f8fafc;
-                padding: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #2563eb;
-            }
+            QMainWindow { background-color: #0f172a; }
+            QWidget { color: #f8fafc; font-family: 'Vazirmatn', 'Segoe UI', Tahoma, sans-serif; font-size: 13px; }
+            QLineEdit { background-color: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 8px 12px; color: #f8fafc; }
+            QLineEdit:focus { border: 1px solid #3b82f6; }
+            QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 8px; padding: 8px 16px; font-weight: 600; }
+            QPushButton:hover { background-color: #334155; }
+            QPushButton#PrimaryBtn { background-color: #2563eb; color: #ffffff; border: none; }
+            QPushButton#PrimaryBtn:hover { background-color: #1d4ed8; }
+            QPushButton#DangerBtn { background-color: #dc2626; color: #ffffff; border: none; }
+            QPushButton#DangerBtn:hover { background-color: #b91c1c; }
+            QPushButton#DangerBtn:disabled { background-color: #451a1a; color: #7f1d1d; }
+            QPushButton#ThemeToggleBtn { background-color: #1e293b; border: 1px solid #475569; color: #f1f5f9; }
+            QProgressBar { background-color: #1e293b; border-radius: 6px; text-align: center; color: #ffffff; font-size: 11px; height: 12px; }
+            QProgressBar::chunk { background-color: #3b82f6; border-radius: 6px; }
+            QTreeWidget, QFrame#SkeletonContainer { background-color: #1e293b; border: 1px solid #334155; border-radius: 10px; outline: 0; padding: 4px; }
+            QTreeWidget::item { padding: 6px 4px; border-bottom: 1px solid #243044; }
+            QTreeWidget::item:hover { background-color: #27354a; }
+            QTreeWidget::item:selected { background-color: #1d4ed8; color: #ffffff; }
+            QHeaderView::section { background-color: #0f172a; color: #94a3b8; padding: 8px; border: none; font-weight: 600; }
+            QMenu { background-color: #1e293b; border: 1px solid #334155; color: #f8fafc; padding: 4px; }
+            QMenu::item:selected { background-color: #2563eb; }
         """
 
     def get_light_stylesheet(self) -> str:
         return """
-            QMainWindow {
-                background-color: #f8fafc;
-            }
-            QWidget {
-                color: #0f172a;
-                font-family: 'Segoe UI', Tahoma, sans-serif;
-                font-size: 13px;
-            }
-            QLineEdit {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 8px;
-                padding: 8px 12px;
-                color: #0f172a;
-            }
-            QLineEdit:focus {
-                border: 1px solid #2563eb;
-            }
-            QPushButton {
-                background-color: #ffffff;
-                color: #0f172a;
-                border: 1px solid #cbd5e1;
-                border-radius: 8px;
-                padding: 8px 16px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #f1f5f9;
-            }
-            QPushButton#PrimaryBtn {
-                background-color: #2563eb;
-                color: #ffffff;
-                border: none;
-            }
-            QPushButton#PrimaryBtn:hover {
-                background-color: #1d4ed8;
-            }
-            QPushButton#DangerBtn {
-                background-color: #ef4444;
-                color: #ffffff;
-                border: none;
-            }
-            QPushButton#DangerBtn:hover {
-                background-color: #dc2626;
-            }
-            QPushButton#DangerBtn:disabled {
-                background-color: #fee2e2;
-                color: #f87171;
-            }
-            QPushButton#ThemeToggleBtn {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                color: #0f172a;
-                padding: 8px 14px;
-            }
-            QPushButton#ThemeToggleBtn:hover {
-                background-color: #e2e8f0;
-            }
-            QProgressBar {
-                background-color: #e2e8f0;
-                border-radius: 6px;
-                text-align: center;
-                color: #0f172a;
-                font-size: 11px;
-                height: 12px;
-            }
-            QProgressBar::chunk {
-                background-color: #2563eb;
-                border-radius: 6px;
-            }
-            QTreeWidget {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 10px;
-                outline: 0;
-                padding: 4px;
-            }
-            QTreeWidget::item {
-                padding: 6px 4px;
-                border-bottom: 1px solid #f1f5f9;
-            }
-            QTreeWidget::item:hover {
-                background-color: #f8fafc;
-            }
-            QTreeWidget::item:selected {
-                background-color: #dbeafe;
-                color: #1e3a8a;
-            }
-            QHeaderView::section {
-                background-color: #f1f5f9;
-                color: #475569;
-                padding: 8px;
-                border: none;
-                font-weight: 600;
-            }
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                color: #0f172a;
-                padding: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #2563eb;
-                color: #ffffff;
-            }
+            QMainWindow { background-color: #f8fafc; }
+            QWidget { color: #0f172a; font-family: 'Vazirmatn', 'Segoe UI', Tahoma, sans-serif; font-size: 13px; }
+            QLineEdit { background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; color: #0f172a; }
+            QLineEdit:focus { border: 1px solid #2563eb; }
+            QPushButton { background-color: #ffffff; color: #0f172a; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 16px; font-weight: 600; }
+            QPushButton:hover { background-color: #f1f5f9; }
+            QPushButton#PrimaryBtn { background-color: #2563eb; color: #ffffff; border: none; }
+            QPushButton#PrimaryBtn:hover { background-color: #1d4ed8; }
+            QPushButton#DangerBtn { background-color: #ef4444; color: #ffffff; border: none; }
+            QPushButton#DangerBtn:hover { background-color: #dc2626; }
+            QPushButton#DangerBtn:disabled { background-color: #fee2e2; color: #f87171; }
+            QPushButton#ThemeToggleBtn { background-color: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; }
+            QProgressBar { background-color: #e2e8f0; border-radius: 6px; text-align: center; color: #0f172a; font-size: 11px; height: 12px; }
+            QProgressBar::chunk { background-color: #2563eb; border-radius: 6px; }
+            QTreeWidget, QFrame#SkeletonContainer { background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 10px; outline: 0; padding: 4px; }
+            QTreeWidget::item { padding: 6px 4px; border-bottom: 1px solid #f1f5f9; }
+            QTreeWidget::item:hover { background-color: #f8fafc; }
+            QTreeWidget::item:selected { background-color: #dbeafe; color: #1e3a8a; }
+            QHeaderView::section { background-color: #f1f5f9; color: #475569; padding: 8px; border: none; font-weight: 600; }
+            QMenu { background-color: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; padding: 4px; }
+            QMenu::item:selected { background-color: #2563eb; color: #ffffff; }
         """
 
     def apply_theme(self):
         if self.is_dark_theme:
             self.setStyleSheet(self.get_dark_stylesheet())
-            self.btn_theme.setText("☀️ تم روشن")
+            self.btn_theme.setText(" تم روشن")
+            if HAS_QTA:
+                self.btn_theme.setIcon(qta.icon('fa5s.sun', color='#f1f5f9'))
             self.lbl_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
             self.lbl_actions_title.setStyleSheet("font-weight: bold; color: #cbd5e1;")
         else:
             self.setStyleSheet(self.get_light_stylesheet())
-            self.btn_theme.setText("🌙 تم تاریک")
+            self.btn_theme.setText(" تم تاریک")
+            if HAS_QTA:
+                self.btn_theme.setIcon(qta.icon('fa5s.moon', color='#0f172a'))
             self.lbl_status.setStyleSheet("color: #64748b; font-size: 12px;")
             self.lbl_actions_title.setStyleSheet("font-weight: bold; color: #334155;")
 
         for card in [self.card_scanned, self.card_dupes, self.card_wasted, self.card_selected]:
             card.apply_theme(self.is_dark_theme)
 
-        # Update existing group items color
+        for sk_card in self.sk_cards:
+            sk_card.set_dark_mode(self.is_dark_theme)
+
         group_color = QColor("#38bdf8") if self.is_dark_theme else QColor("#0284c7")
         for idx in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(idx).setForeground(0, group_color)
@@ -458,9 +413,9 @@ class ModernDuplicateFinder(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        main_layout.setSpacing(14)
 
-        # 1. Top Folder Selection Bar & Theme Switcher
+        # 1. Top Folder Selection Bar
         folder_layout = QHBoxLayout()
         folder_layout.setSpacing(10)
 
@@ -468,19 +423,24 @@ class ModernDuplicateFinder(QMainWindow):
         self.txt_folder.setPlaceholderText("مسیر پوشه مورد نظر را انتخاب کنید...")
         self.txt_folder.setReadOnly(True)
 
-        self.btn_browse = QPushButton("📁 انتخاب پوشه")
-        self.btn_browse.clicked.connect(self.browse_folder)
-
-        self.btn_scan = QPushButton("▶ شروع اسکن")
+        self.btn_browse = QPushButton(" انتخاب پوشه")
+        self.btn_scan = QPushButton(" شروع اسکن")
         self.btn_scan.setObjectName("PrimaryBtn")
-        self.btn_scan.clicked.connect(self.start_scan)
 
-        self.btn_cancel = QPushButton("⏹ توقف")
+        self.btn_cancel = QPushButton(" توقف")
         self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self.cancel_scan)
 
-        self.btn_theme = QPushButton("☀️ تم روشن")
+        self.btn_theme = QPushButton(" تم تاریک")
         self.btn_theme.setObjectName("ThemeToggleBtn")
+
+        if HAS_QTA:
+            self.btn_browse.setIcon(qta.icon('fa5s.folder-open', color='#0f172a'))
+            self.btn_scan.setIcon(qta.icon('fa5s.play', color='white'))
+            self.btn_cancel.setIcon(qta.icon('fa5s.stop', color='#f8fafc'))
+
+        self.btn_browse.clicked.connect(self.browse_folder)
+        self.btn_scan.clicked.connect(self.start_scan)
+        self.btn_cancel.clicked.connect(self.cancel_scan)
         self.btn_theme.clicked.connect(self.toggle_theme)
 
         folder_layout.addWidget(self.txt_folder, stretch=1)
@@ -492,7 +452,7 @@ class ModernDuplicateFinder(QMainWindow):
 
         # 2. Metric KPI Cards
         cards_layout = QGridLayout()
-        cards_layout.setSpacing(12)
+        cards_layout.setSpacing(14)
 
         self.card_scanned = MetricCard("فایل‌های اسکن شده", "0", "#38bdf8", "#0284c7")
         self.card_dupes = MetricCard("فایل‌های تکراری", "0", "#fbbf24", "#d97706")
@@ -515,29 +475,34 @@ class ModernDuplicateFinder(QMainWindow):
         status_box.addWidget(self.progress_bar)
         main_layout.addLayout(status_box)
 
-        # 4. Smart Selection Action Bar
+        # 4. Action Bar
         action_bar = QHBoxLayout()
         action_bar.setSpacing(8)
 
-        self.lbl_actions_title = QLabel("انتخاب هوشمند:")
+        self.lbl_actions_title = QLabel("مدیریت انتخاب‌ها:")
+        self.btn_clear_sel = QPushButton(" لغو انتخاب‌ها")
+        if HAS_QTA:
+            self.btn_clear_sel.setIcon(qta.icon('fa5s.times', color='#0f172a'))
 
-        self.btn_keep_oldest = QPushButton("⚡ نگه‌داشتن قدیمی‌ترین (فایل اصل)")
-        self.btn_keep_oldest.clicked.connect(lambda: self.smart_select(keep="oldest"))
-
-        self.btn_keep_newest = QPushButton("⚡ نگه‌داشتن جدیدترین")
-        self.btn_keep_newest.clicked.connect(lambda: self.smart_select(keep="newest"))
-
-        self.btn_clear_sel = QPushButton("✕ لغو انتخاب‌ها")
         self.btn_clear_sel.clicked.connect(self.clear_selection)
 
         action_bar.addWidget(self.lbl_actions_title)
-        action_bar.addWidget(self.btn_keep_oldest)
-        action_bar.addWidget(self.btn_keep_newest)
         action_bar.addWidget(self.btn_clear_sel)
         action_bar.addStretch()
         main_layout.addLayout(action_bar)
 
-        # 5. Duplicate Files Tree
+        # 5. Central Display Area: Skeleton Loading Screen vs TreeWidget
+        self.skeleton_container = QFrame()
+        self.skeleton_container.setObjectName("SkeletonContainer")
+        sk_layout = QVBoxLayout(self.skeleton_container)
+        sk_layout.setSpacing(10)
+        sk_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.sk_cards = [SkeletonCard(is_dark=self.is_dark_theme) for _ in range(3)]
+        for card in self.sk_cards:
+            sk_layout.addWidget(card)
+        sk_layout.addStretch()
+
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
         self.tree.setHeaderLabels(["نام فایل / گروه", "حجم", "تاریخ تغییر", "مسیر کامل"])
@@ -549,17 +514,26 @@ class ModernDuplicateFinder(QMainWindow):
         self.tree.itemChanged.connect(self.on_item_checked)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.show_context_menu)
+
+        main_layout.addWidget(self.skeleton_container, stretch=1)
         main_layout.addWidget(self.tree, stretch=1)
+        self.skeleton_container.hide() # مخفی در حالت اولیه
 
         # 6. Bottom Action Bar
         bottom_layout = QHBoxLayout()
         bottom_layout.setSpacing(12)
 
-        self.btn_export = QPushButton("📋 خروجی گزارش (TXT)")
+        self.btn_export = QPushButton(" خروجی گزارش (TXT)")
+        if HAS_QTA:
+            self.btn_export.setIcon(qta.icon('fa5s.file-download', color='#0f172a'))
+
         self.btn_export.clicked.connect(self.export_report)
 
-        self.btn_delete = QPushButton("🗑 انتقال فایل‌های انتخاب‌شده به سطل زباله")
+        self.btn_delete = QPushButton(" انتقال فایل‌های انتخاب‌شده به سطل زباله")
         self.btn_delete.setObjectName("DangerBtn")
+        if HAS_QTA:
+            self.btn_delete.setIcon(qta.icon('fa5s.trash-alt', color='white'))
+
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self.delete_selected)
 
@@ -587,6 +561,10 @@ class ModernDuplicateFinder(QMainWindow):
         self.card_selected.set_value("0 (0 B)")
         self.progress_bar.setValue(0)
 
+        # فعال‌سازی انیمیشن اسکلتی لودینگ
+        self.tree.hide()
+        self.skeleton_container.show()
+
         self.btn_scan.setEnabled(False)
         self.btn_browse.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -603,14 +581,22 @@ class ModernDuplicateFinder(QMainWindow):
         if self.worker:
             self.worker.cancel()
             self.btn_cancel.setEnabled(False)
+            self.skeleton_container.hide()
+            self.tree.show()
 
     def on_scan_error(self, err: str):
+        self.skeleton_container.hide()
+        self.tree.show()
         self.btn_scan.setEnabled(True)
         self.btn_browse.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         QMessageBox.critical(self, "خطا در اسکن", f"مشکلی در حین اسکن رخ داد:\n{err}")
 
     def on_scan_completed(self, duplicate_groups: dict, total_scanned: int):
+        # بازگرداندن جدول اصلی و غیرفعال‌سازی اسکلت لودینگ
+        self.skeleton_container.hide()
+        self.tree.show()
+
         self.btn_scan.setEnabled(True)
         self.btn_browse.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -639,7 +625,7 @@ class ModernDuplicateFinder(QMainWindow):
             group_title = f"گروه {group_idx}: {len(files)} فایل مشابه (هدررفت: {human_size(wasted)})"
             group_item = QTreeWidgetItem([group_title, human_size(file_size), "", f"هش: {h[:12]}..."])
             group_item.setForeground(0, group_color)
-            group_item.setFont(0, QFont("Segoe UI", 10, QFont.Bold))
+            group_item.setFont(0, QFont("Vazirmatn", 10, QFont.Bold))
 
             for f_info in files:
                 fname = os.path.basename(f_info["path"])
@@ -685,25 +671,6 @@ class ModernDuplicateFinder(QMainWindow):
         self.card_selected.set_value(f"{count:,} ({human_size(total_bytes)})")
         self.btn_delete.setEnabled(count > 0)
 
-    def smart_select(self, keep: str = "oldest"):
-        self.tree.blockSignals(True)
-        for g_idx in range(self.tree.topLevelItemCount()):
-            group = self.tree.topLevelItem(g_idx)
-            children = [group.child(i) for i in range(group.childCount())]
-            if not children:
-                continue
-
-            children.sort(key=lambda item: item.data(0, Qt.UserRole)["mtime"])
-
-            for idx, child in enumerate(children):
-                if keep == "oldest":
-                    child.setCheckState(0, Qt.Checked if idx > 0 else Qt.Unchecked)
-                elif keep == "newest":
-                    child.setCheckState(0, Qt.Checked if idx < len(children) - 1 else Qt.Unchecked)
-
-        self.tree.blockSignals(False)
-        self.update_selected_summary()
-
     def clear_selection(self):
         self.tree.blockSignals(True)
         for g_idx in range(self.tree.topLevelItemCount()):
@@ -723,8 +690,12 @@ class ModernDuplicateFinder(QMainWindow):
             return
 
         menu = QMenu(self)
-        action_open_dir = QAction("📂 باز کردن پوشه فایل", self)
-        action_copy_path = QAction("📋 کپی آدرس کامل", self)
+        action_open_dir = QAction(" باز کردن پوشه فایل", self)
+        action_copy_path = QAction(" کپی آدرس کامل", self)
+
+        if HAS_QTA:
+            action_open_dir.setIcon(qta.icon('fa5s.folder-open'))
+            action_copy_path.setIcon(qta.icon('fa5s.copy'))
 
         action_open_dir.triggered.connect(lambda: self.reveal_in_explorer(f_info["path"]))
         action_copy_path.triggered.connect(lambda: QApplication.clipboard().setText(f_info["path"]))
@@ -846,8 +817,16 @@ class ModernDuplicateFinder(QMainWindow):
             QMessageBox.information(self, "اتمام عملیات", res_msg)
 
 
+# ==========================================
+# نقطه ورود برنامه (Main Entry Point)
+# ==========================================
 def main():
     app = QApplication(sys.argv)
+
+    # تنظیم فونت سراسری وزیرمتن
+    font = QFont("Vazirmatn", 10)
+    app.setFont(font)
+
     window = ModernDuplicateFinder()
     window.show()
     sys.exit(app.exec())
